@@ -3,6 +3,11 @@ import mediapipe as mp
 import numpy as np
 import time
 import math
+import os
+from datetime import datetime
+from PIL import Image
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas as pdf_canvas
 
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
@@ -15,6 +20,77 @@ hands = mp_hands.Hands(
 mp_draw = mp.solutions.drawing_utils
 
 canvas = np.zeros((480, 640, 3), dtype=np.uint8)
+
+# Create output directory for saved files
+output_dir = "saved_notes"
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+# Save & Export Functions
+def save_canvas_as_image(canvas, format='png'):
+    """Save the canvas as PNG or JPG with timestamp"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(output_dir, f"airwriting_{timestamp}.{format}")
+    
+    # Convert BGR to RGB for PIL
+    canvas_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+    
+    # Create PIL Image
+    img = Image.fromarray(canvas_rgb)
+    
+    # Save based on format
+    if format.lower() == 'png':
+        img.save(filename, 'PNG')
+    elif format.lower() in ['jpg', 'jpeg']:
+        img.save(filename, 'JPEG', quality=95)
+    
+    print(f"✓ Saved as {format.upper()}: {filename}")
+    return filename
+
+def save_canvas_as_pdf(canvas):
+    """Convert canvas to PDF"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(output_dir, f"airwriting_{timestamp}.pdf")
+    
+    # First save as temporary PNG
+    temp_png = os.path.join(output_dir, "temp_canvas.png")
+    canvas_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+    img = Image.fromarray(canvas_rgb)
+    img.save(temp_png, 'PNG')
+    
+    # Create PDF
+    c = pdf_canvas.Canvas(filename, pagesize=letter)
+    width, height = letter
+    
+    # Calculate aspect ratio to fit canvas on page
+    canvas_h, canvas_w = canvas.shape[:2]
+    aspect = canvas_w / canvas_h
+    
+    # Fit to page with margins
+    margin = 50
+    pdf_width = width - 2 * margin
+    pdf_height = pdf_width / aspect
+    
+    if pdf_height > height - 2 * margin:
+        pdf_height = height - 2 * margin
+        pdf_width = pdf_height * aspect
+    
+    x = (width - pdf_width) / 2
+    y = (height - pdf_height) / 2
+    
+    c.drawImage(temp_png, x, y, width=pdf_width, height=pdf_height)
+    c.save()
+    
+    # Clean up temporary file
+    if os.path.exists(temp_png):
+        os.remove(temp_png)
+    
+    print(f"✓ Saved as PDF: {filename}")
+    return filename
+
+def auto_save_note(canvas):
+    """Automatically save note with timestamp (PNG by default)"""
+    return save_canvas_as_image(canvas, format='png')
 
 # Undo/Redo stacks
 canvas_history = [canvas.copy()]
@@ -33,7 +109,7 @@ mode = "draw"
 thickness = 5
 
 # Stability controls
-SMOOTHING = 0.65
+SMOOTHING = 0.75
 MIN_MOVE = 1
 UI_HOVER_TIME = 0.6
 last_hover_time = 0
@@ -49,7 +125,9 @@ buttons = {
     "green":  (120, 10, 220, 60),
     "red":    (230, 10, 330, 60),
     "eraser": (340, 10, 460, 60),
-    "clear":  (470, 10, 630, 60),
+    "clear":  (470, 10, 580, 60),
+    "save":   (10, 70, 110, 120),  # Save button below colors
+    "close":  (590, 10, 630, 50),  # Close button in top right
 }
 
 def draw_buttons(frame):
@@ -58,8 +136,16 @@ def draw_buttons(frame):
     cv2.rectangle(frame, buttons["red"][:2], buttons["red"][2:], (0,0,255), -1)
     cv2.rectangle(frame, buttons["eraser"][:2], buttons["eraser"][2:], (60,60,60), -1)
     cv2.rectangle(frame, buttons["clear"][:2], buttons["clear"][2:], (120,120,120), -1)
+    cv2.rectangle(frame, buttons["save"][:2], buttons["save"][2:], (0,200,0), -1)
+    cv2.rectangle(frame, buttons["close"][:2], buttons["close"][2:], (0,0,200), -1)
+    
     cv2.putText(frame, "ERASE", (355,45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
     cv2.putText(frame, "CLEAR", (485,45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+    cv2.putText(frame, "SAVE", (25,105), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+    
+    # Draw X mark for close button
+    cv2.line(frame, (595, 15), (625, 45), (255,255,255), 3)
+    cv2.line(frame, (625, 15), (595, 45), (255,255,255), 3)
 
 def inside(box, x, y):
     x1,y1,x2,y2 = box
@@ -132,7 +218,17 @@ while True:
         # Peace sign: Index + middle extended, others closed (undo from fist)
         peace_sign = index_extended and middle_extended and ring_closed and pinky_closed
         thumb_neutral = abs(thumb_tip_x - thumb_mcp_x) < 60
-        peace_gesture = peace_sign and thumb_neutral
+        
+        # Check distance between index and middle finger tips for distinction
+        index_tip_x = ix
+        middle_tip_x = int(hand.landmark[12].x * w)
+        finger_distance = abs(index_tip_x - middle_tip_x)
+        
+        # Peace gesture: fingers APART (for undo)
+        peace_gesture = peace_sign and thumb_neutral and finger_distance > 30
+        
+        # Save gesture: index + middle TOGETHER (pinched, for save)
+        save_gesture = peace_sign and thumb_neutral and finger_distance <= 30
         
         # Open hand: All 5 fingers extended (redo from fist)
         all_fingers_open = index_extended and middle_extended and ring_extended and pinky_extended
@@ -188,7 +284,10 @@ while True:
 
         # --------- UI HOVER (NON-BLOCKING) ----------
         hovered = None
-        if smooth_y < 70 and index_extended:
+        # Allow index extended for color/clear/eraser, or save gesture for save button
+        can_interact_ui = smooth_y < 130 and (index_extended or save_gesture)
+        
+        if can_interact_ui:
             for name, box in buttons.items():
                 if inside(box, smooth_x, smooth_y):
                     hovered = name
@@ -196,11 +295,21 @@ while True:
 
             if hovered == current_hover:
                 if now - last_hover_time > UI_HOVER_TIME:
-                    if hovered == "blue":   color=(255,0,0); mode="draw"
-                    if hovered == "green":  color=(0,255,0); mode="draw"
-                    if hovered == "red":    color=(0,0,255); mode="draw"
-                    if hovered == "eraser": mode="erase"
-                    if hovered == "clear":
+                    # Regular buttons need only index finger
+                    if hovered == "blue" and index_extended:   color=(255,0,0); mode="draw"
+                    if hovered == "green" and index_extended:  color=(0,255,0); mode="draw"
+                    if hovered == "red" and index_extended:    color=(0,0,255); mode="draw"
+                    if hovered == "eraser" and index_extended: mode="erase"
+                    # Save button requires save gesture (index + middle TOGETHER)
+                    if hovered == "save" and save_gesture:
+                        # Save as PNG by default
+                        auto_save_note(canvas)
+                    # Close button - exit application
+                    if hovered == "close" and index_extended:
+                        cap.release()
+                        cv2.destroyAllWindows()
+                        exit()
+                    if hovered == "clear" and index_extended:
                         canvas[:] = 0
                         prev_x, prev_y = None, None
                         # Save clear action to history
@@ -224,7 +333,14 @@ while True:
         
         hand_was_visible = True
         
-        if writing_gesture and smooth_y > 70:
+        # Check if current position is NOT on any button
+        on_button = False
+        for name, box in buttons.items():
+            if inside(box, smooth_x, smooth_y):
+                on_button = True
+                break
+        
+        if writing_gesture and not on_button:  # Allow writing anywhere except buttons
             if prev_x is not None and prev_y is not None:
                 dist = math.hypot(smooth_x - prev_x, smooth_y - prev_y)
                 # Draw for almost any movement, very forgiving
@@ -236,21 +352,21 @@ while True:
                 # Always update position to maintain continuity
                 prev_x, prev_y = smooth_x, smooth_y
             else:
-                # Start new stroke - save canvas state for undo
-                if writing_active == False:
-                    # Remove future history when starting new action
-                    canvas_history = canvas_history[:history_index + 1]
-                    canvas_history.append(canvas.copy())
-                    # Limit history size
-                    if len(canvas_history) > MAX_HISTORY:
-                        canvas_history.pop(0)
-                    else:
-                        history_index += 1
+                # Start new stroke
                 prev_x, prev_y = smooth_x, smooth_y
             writing_active = True
         else:
             if writing_active and gesture_stable_count == 0:
-                # Only end stroke when gesture completely stops
+                # Stroke ended - save canvas state to history for undo
+                # Remove future history when completing an action
+                canvas_history = canvas_history[:history_index + 1]
+                canvas_history.append(canvas.copy())
+                # Limit history size
+                if len(canvas_history) > MAX_HISTORY:
+                    canvas_history.pop(0)
+                else:
+                    history_index += 1
+                
                 prev_x, prev_y = None, None
                 writing_active = False
 
@@ -267,10 +383,21 @@ while True:
     inv = cv2.cvtColor(inv, cv2.COLOR_GRAY2BGR)
     frame = cv2.bitwise_and(frame, inv)
     frame = cv2.bitwise_or(frame, canvas)
+    
 
+    
     cv2.imshow("Finger Writing Notebook (Smooth & Stable)", frame)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    key = cv2.waitKey(1) & 0xFF
+    
+    # Keyboard shortcuts for saving
+    if key == ord('s'):
+        save_canvas_as_image(canvas, format='png')
+    elif key == ord('p'):
+        save_canvas_as_pdf(canvas)
+    elif key == ord('j'):
+        save_canvas_as_image(canvas, format='jpg')
+    elif key == ord('q'):
         break
 
 cap.release()
