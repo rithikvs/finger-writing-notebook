@@ -2,17 +2,6 @@
 
 A real-time hand gesture-based air writing application that allows you to write and draw in the air using your webcam. Write notes, create sketches, and save your work—all without touching a screen!
 
-## 🎥 Demo
-
-https://github.com/user-attachments/assets/your-video-file.mp4
-
-> **Note**: Replace the above link with your actual demo video URL after uploading to GitHub or add a video file to your repository.
-
-Alternatively, you can add a video file to your repository:
-```markdown
-![Demo Video](demo/demo-video.gif)
-```
-
 ## ✨ Features
 
 ### Core Functionality
